@@ -1,0 +1,59 @@
+FROM node:20-trixie-slim
+
+# Install dependencies
+RUN apt update \
+ && apt install -y --no-install-recommends openssl ffmpeg python3 python3-pip ca-certificates gnupg gosu build-essential curl git va-driver-all \
+ && gosu nobody true \
+ && rm /var/lib/apt/lists/* -fR
+
+RUN corepack enable && corepack prepare pnpm@10.15.1 --activate
+
+# Node images hardcode the node uid to 1000 so that number is not available.
+ENV DEFAULT_PEERTUBE_UID=999
+ENV DEFAULT_PEERTUBE_GID=999
+
+# Add peertube user
+RUN groupadd -r -g ${PEERTUBE_GID:-${DEFAULT_PEERTUBE_GID}} peertube \
+    && useradd -r -u ${PEERTUBE_UID:-${DEFAULT_PEERTUBE_UID}} -g peertube -m peertube
+
+# Install PeerTube
+COPY --chown=peertube:peertube . /app
+WORKDIR /app
+
+USER peertube
+
+# Install all dependencies (including dev dependencies for building)
+RUN npm run install-node-dependencies
+
+# Build the application
+RUN npm run build
+
+# Now remove dev dependencies and keep only production ones
+RUN rm -rf ./node_modules ./client/node_modules ./client/.angular \
+ && npm run install-node-dependencies -- --production \
+ && pnpm store prune
+
+USER root
+
+RUN mkdir -p /data /config
+RUN chown -R peertube:peertube /data /config
+
+ENV NODE_ENV=production
+ENV NODE_CONFIG_DIR=/app/config:/app/support/docker/production/config:/config
+ENV PEERTUBE_LOCAL_CONFIG=/config
+
+VOLUME /data
+VOLUME /config
+
+COPY ./support/docker/production/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Expose API, RTMP and RTMPS ports
+EXPOSE 9000 1935 1936
+
+USER peertube
+
+ENTRYPOINT [ "/usr/local/bin/entrypoint.sh" ]
+
+# Run the application
+CMD [ "node", "dist/server" ]
